@@ -8,7 +8,7 @@ on:
         default: "dev"
 jobs:
   smoke:
-    environment: ${{ inputs.environment }}   # <-- this loads environment secrets
+    environment: ${{ inputs.environment }}  # <-- loads dev env secrets
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -16,9 +16,8 @@ jobs:
     steps:
       - name: Debug role presence
         run: |
-          echo "ROLE: ${{ secrets.AWS_ROLE_ARN }}"
-          echo "::add-mask::${{ secrets.AWS_ROLE_ARN }}"
-          test -n "${{ secrets.AWS_ROLE_ARN }}" || (echo "Missing AWS_ROLE_ARN secret for this environment" && exit 1)
+          echo "ROLE=${{ secrets.AWS_ROLE_ARN }}"
+          test -n "${{ secrets.AWS_ROLE_ARN }}" || (echo "Missing AWS_ROLE_ARN env secret" && exit 1)
 
       - name: Configure AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -28,6 +27,3 @@ jobs:
 
       - name: Who am I?
         run: aws sts get-caller-identity
-
-      - name: S3 list
-        run: aws s3 ls || true
