@@ -6,29 +6,67 @@ on:
         description: "dev | stg | prod"
         required: true
         default: dev
+      build_dir:
+        description: "Output dir (dist|build|public)"
+        required: false
+        default: dist
 
 jobs:
   deploy:
-
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+    permissions: { id-token: write, contents: read }
 
-      - name: Configure AWS credentials (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # env-scoped
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
-      - name: Generate static site
+      - name: Setup Node 24 (cache npm)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install deps (auto-detect)
         run: |
-          mkdir -p dist
-          echo "<h1>Deployed OK - $GITHUB_SHA</h1>" > dist/index.html
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm -v || npm i -g pnpm
+            pnpm i --frozen-lockfile || pnpm i
+            echo "PKG_MGR=pnpm" >> $GITHUB_ENV
+          elif [ -f yarn.lock ]; then
+            yarn --version || npm i -g yarn
+            yarn install --frozen-lockfile || yarn install
+            echo "PKG_MGR=yarn" >> $GITHUB_ENV
+          elif [ -f package-lock.json ]; then
+            npm ci || npm install
+            echo "PKG_MGR=npm" >> $GITHUB_ENV
+          elif [ -f package.json ]; then
+            npm install
+            echo "PKG_MGR=npm" >> $GITHUB_ENV
+          else
+            echo "No package.json found; creating simple dist/"
+            mkdir -p dist && echo "<h1>OK $GITHUB_SHA</h1>" > dist/index.html
+            echo "PKG_MGR=none" >> $GITHUB_ENV
+          fi
+
+      - name: Build app (skip if none)
+        run: |
+          if [ "$PKG_MGR" = "pnpm" ]; then pnpm build || true; fi
+          if [ "$PKG_MGR" = "yarn" ]; then yarn build || true; fi
+          if [ "$PKG_MGR" = "npm" ]; then npm run build || true; fi
+
+      - name: Resolve build_dir
+        run: |
+          BD="${{ inputs.build_dir }}"
+          for d in "$BD" dist build public; do
+            if [ -d "$d" ]; then echo "BUILD_DIR=$d" >> $GITHUB_ENV; exit 0; fi
+          done
+          echo "No build output dir found" >&2; exit 1
 
       - name: Select bucket by environment
         run: |
@@ -36,10 +74,16 @@ jobs:
             dev)  echo "BUCKET=${{ secrets.S3_BUCKET_DEV }}"  >> $GITHUB_ENV;;
             stg)  echo "BUCKET=${{ secrets.S3_BUCKET_STG }}"  >> $GITHUB_ENV;;
             prod) echo "BUCKET=${{ secrets.S3_BUCKET_PROD }}" >> $GITHUB_ENV;;
-            *) echo "invalid env"; exit 2;;
+            *) exit 2;;
           esac
-          echo "Using bucket: $BUCKET"
+          echo "Using bucket: $BUCKET; build dir: $BUILD_DIR"
 
       - name: Sync to S3
         run: |
-          aws s3 sync dist/ "s3://${BUCKET}/" --delete
+          aws s3 sync "$BUILD_DIR/" "s3://${BUCKET}/" --delete --size-only \
+            --exclude "index.html"
+          if [ -f "$BUILD_DIR/index.html" ]; then
+            aws s3 cp "$BUILD_DIR/index.html" "s3://${BUCKET}/index.html" \
+              --cache-control "no-cache,no-store,must-revalidate" \
+              --content-type "text/html"
+          fi
