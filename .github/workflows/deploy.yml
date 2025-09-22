@@ -3,11 +3,14 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "Environment to deploy"
+        description: "dev | stg | prod"
         required: true
         default: dev
+
 jobs:
   deploy:
+
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -15,15 +18,28 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-      - name: Configure AWS credentials
+
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}   # env-scoped
           aws-region: us-east-1
+
       - name: Generate static site
         run: |
           mkdir -p dist
           echo "<h1>Deployed OK - $GITHUB_SHA</h1>" > dist/index.html
+
+      - name: Select bucket by environment
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)  echo "BUCKET=${{ secrets.S3_BUCKET_DEV }}"  >> $GITHUB_ENV;;
+            stg)  echo "BUCKET=${{ secrets.S3_BUCKET_STG }}"  >> $GITHUB_ENV;;
+            prod) echo "BUCKET=${{ secrets.S3_BUCKET_PROD }}" >> $GITHUB_ENV;;
+            *) echo "invalid env"; exit 2;;
+          esac
+          echo "Using bucket: $BUCKET"
+
       - name: Sync to S3
         run: |
-          aws s3 sync dist/ s3://${{ secrets.S3_BUCKET_DEV }}/ --delete
+          aws s3 sync dist/ "s3://${BUCKET}/" --delete
