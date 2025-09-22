@@ -1,52 +1,66 @@
 name: Deploy (S3 static)
+
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "dev | stg | prod"
+        description: Which environment to deploy
         required: true
-        default: dev
+        type: choice
+        options: [dev, stg, prod]
       build_dir:
-        description: "directory to sync to S3"
+        description: Directory to upload (defaults to dist)
         required: false
         default: dist
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  BUCKET_DEV:  qfcr-asset-library-dev-609905236033
+  BUCKET_STG:  qfcr-asset-library-stg-609905236033
+  BUCKET_PROD: qfcr-asset-library-prod-609905236033
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    permissions:
-      id-token: write
-      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure AWS (OIDC)
+      - name: Assume AWS via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          aws-region: ${{ env.AWS_REGION }}
 
-      - name: Ensure build dir + simple index if empty
+      - name: Ensure artifact exists (bootstrap)
         run: |
-          mkdir -p "${{ inputs.build_dir }}"
-          if [ ! -s "${{ inputs.build_dir }}/index.html" ]; then
-            echo "<h1>Deployed OK - ${GITHUB_SHA}</h1>" > "${{ inputs.build_dir }}/index.html"
-          fi
+          DIR="${{ inputs.build_dir }}"
+          mkdir -p "$DIR"
+          [ -f "$DIR/index.html" ] || echo "<h1>Deployed OK - $GITHUB_SHA</h1>" > "$DIR/index.html"
 
-      - name: Select bucket by environment
+      - name: Pick bucket by env
+        id: pick
+        shell: bash
         run: |
           case "${{ inputs.environment }}" in
-            dev)  echo "BUCKET=${{ secrets.S3_BUCKET_DEV  }}"  >> $GITHUB_ENV ;;
-            stg)  echo "BUCKET=${{ secrets.S3_BUCKET_STG  }}"  >> $GITHUB_ENV ;;
-            prod) echo "BUCKET=${{ secrets.S3_BUCKET_PROD }}"  >> $GITHUB_ENV ;;
-            *) exit 2 ;;
+            dev)  echo "bucket=${{ env.BUCKET_DEV }}"  >> "$GITHUB_OUTPUT" ;;
+            stg)  echo "bucket=${{ env.BUCKET_STG }}"  >> "$GITHUB_OUTPUT" ;;
+            prod) echo "bucket=${{ env.BUCKET_PROD }}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "invalid environment"; exit 1 ;;
           esac
-          echo "Using bucket: $BUCKET"
 
       - name: Sync to S3
         run: |
-          aws s3 sync "${{ inputs.build_dir }}/" "s3://${BUCKET}/" --delete
-          aws s3 cp   "${{ inputs.build_dir }}/index.html" "s3://${BUCKET}/index.html" \
-            --cache-control "no-cache,no-store,must-revalidate" --content-type "text/html"
+          aws s3 sync "${{ inputs.build_dir }}/" "s3://${{ steps.pick.outputs.bucket }}/" --delete
+
+      - name: Invalidate CloudFront (optional)
+        if: ${{ secrets.CF_DIST_ID != '' }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ secrets.CF_DIST_ID }}" \
+            --paths "/index.html" "/assets/*"
