@@ -7,7 +7,7 @@ on:
         required: true
         default: dev
       build_dir:
-        description: "output dir to sync"
+        description: "directory to sync to S3"
         required: false
         default: dist
 
@@ -45,7 +45,7 @@ jobs:
           esac
           echo "Using bucket: $BUCKET"
 
-      - name: Sync to S3 (static)
+      - name: Sync to S3
         run: |
           aws s3 sync "${{ inputs.build_dir }}/" "s3://${BUCKET}/" --delete
           aws s3 cp   "${{ inputs.build_dir }}/index.html" "s3://${BUCKET}/index.html" \
