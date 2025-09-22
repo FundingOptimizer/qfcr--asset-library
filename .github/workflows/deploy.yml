@@ -10,7 +10,7 @@ on:
       build_cmd:
         description: "Build command"
         required: false
-        default: "npm ci && npm run build"
+        default: "npm run build"
       build_dir:
         description: "Directory with built assets"
         required: false
@@ -18,7 +18,7 @@ on:
 
 jobs:
   deploy:
-    environment: ${{ inputs.environment }}        # loads env secrets
+    environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -27,36 +27,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Assume AWS via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Use Node.js 24
+        uses: actions/setup-node@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: us-east-1
+          node-version: 24
+          cache: 'npm'
+
+      - name: Install deps (ci if lockfile, else install)
+        run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
 
       - name: Build
         run: |
-          set -e
-          echo "Running: ${{ inputs.build_cmd }}"
           bash -lc '${{ inputs.build_cmd }}'
 
       - name: Verify build dir
         run: |
           test -d "${{ inputs.build_dir }}" || (echo "Build dir missing: ${{ inputs.build_dir }}" && exit 1)
-          echo "Artifacts in ${{ inputs.build_dir }}:"
           find "${{ inputs.build_dir }}" -type f | head -n 50
 
-      - name: Select bucket by environment
+      - name: Select bucket
         run: |
           case "${{ inputs.environment }}" in
-            dev)  BUCKET="${{ secrets.S3_BUCKET_DEV }}";;
-            stg)  BUCKET="${{ secrets.S3_BUCKET_STG }}";;
-            prod) BUCKET="${{ secrets.S3_BUCKET_PROD }}";;
-            *) echo "invalid environment"; exit 2;;
+            dev)  echo "BUCKET=${{ secrets.S3_BUCKET_DEV }}"  >> $GITHUB_ENV;;
+            stg)  echo "BUCKET=${{ secrets.S3_BUCKET_STG }}"  >> $GITHUB_ENV;;
+            prod) echo "BUCKET=${{ secrets.S3_BUCKET_PROD }}" >> $GITHUB_ENV;;
+            *) exit 2;;
           esac
-          echo "BUCKET=$BUCKET" >> $GITHUB_ENV
           echo "Using bucket: $BUCKET"
 
-      - name: Sync to S3 (immutable assets, no-cache HTML)
+      - name: Sync to S3
         run: |
           aws s3 sync "${{ inputs.build_dir }}/" "s3://${BUCKET}/" \
             --delete --size-only --cache-control "public,max-age=31536000,immutable" \
