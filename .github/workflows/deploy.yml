@@ -1,15 +1,68 @@
-name: Deploy
+name: Deploy (S3 static)
+
 on:
   workflow_dispatch:
     inputs:
       environment:
-        description: "dev|stg|prod"
+        description: "dev | stg | prod"
         required: true
         default: "dev"
+      build_cmd:
+        description: "Build command"
+        required: false
+        default: "npm ci && npm run build"
+      build_dir:
+        description: "Directory with built assets"
+        required: false
+        default: "dist"
+
 jobs:
-  call:
-    uses: FundingOptimizer/platform-ci/.github/workflows/_deploy.yml@main
-    with:
-      environment: ${{ inputs.environment }}
-    secrets:
-      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+  deploy:
+    environment: ${{ inputs.environment }}        # loads env secrets
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume AWS via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Build
+        run: |
+          set -e
+          echo "Running: ${{ inputs.build_cmd }}"
+          bash -lc '${{ inputs.build_cmd }}'
+
+      - name: Verify build dir
+        run: |
+          test -d "${{ inputs.build_dir }}" || (echo "Build dir missing: ${{ inputs.build_dir }}" && exit 1)
+          echo "Artifacts in ${{ inputs.build_dir }}:"
+          find "${{ inputs.build_dir }}" -type f | head -n 50
+
+      - name: Select bucket by environment
+        run: |
+          case "${{ inputs.environment }}" in
+            dev)  BUCKET="${{ secrets.S3_BUCKET_DEV }}";;
+            stg)  BUCKET="${{ secrets.S3_BUCKET_STG }}";;
+            prod) BUCKET="${{ secrets.S3_BUCKET_PROD }}";;
+            *) echo "invalid environment"; exit 2;;
+          esac
+          echo "BUCKET=$BUCKET" >> $GITHUB_ENV
+          echo "Using bucket: $BUCKET"
+
+      - name: Sync to S3 (immutable assets, no-cache HTML)
+        run: |
+          aws s3 sync "${{ inputs.build_dir }}/" "s3://${BUCKET}/" \
+            --delete --size-only --cache-control "public,max-age=31536000,immutable" \
+            --exclude "index.html"
+          if [ -f "${{ inputs.build_dir }}/index.html" ]; then
+            aws s3 cp "${{ inputs.build_dir }}/index.html" "s3://${BUCKET}/index.html" \
+              --cache-control "no-cache,no-store,must-revalidate" \
+              --content-type "text/html"
+          fi
